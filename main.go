@@ -3,120 +3,140 @@ package main
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"github.com/aws/aws-sdk-go/service/sns"
-	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/joho/godotenv"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 )
 
-var sess = session.Must(session.NewSession(&aws.Config{Region: aws.String("us-east-1")}))
+var (
+	AwsRegion    string
+	SqsQueueName string
+	SnsTopicArn  string
+	S3Bucket     string
+)
+var sess *session.Session
+var sqsClient *SqsClient
+var snsClient *SnsClient
+var log *zap.SugaredLogger
+var S3Uploader *s3manager.Uploader
+var S3Downloader *s3manager.Downloader
 
-func putToSns(w http.ResponseWriter, r *http.Request) {
-	sess := session.Must(session.NewSession(&aws.Config{Region: aws.String("ap-south-1")}))
+func main() {
+	//load env
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+	//init logger
+	config := zap.NewDevelopmentConfig()
+	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	logger, _ := config.Build()
+	log = logger.Sugar()
+
+	//init env vars
+	AwsRegion = os.Getenv("AWS_REGION")
+	SqsQueueName = os.Getenv("SQS_QUEUE_NAME")
+	SnsTopicArn = os.Getenv("SNS_TOPIC_ARN")
+	S3Bucket = os.Getenv("S3_BUCKET")
+
+	//init aws clients
+	sess = session.Must(session.NewSession(&aws.Config{Region: aws.String(AwsRegion)}))
+	sqsClient = NewSqsClient(sess, SqsQueueName)
+	snsClient = NewSnsClient(sess)
+	S3Uploader = s3manager.NewUploader(sess)
+	S3Downloader = s3manager.NewDownloader(sess)
+
+	//init http server
+	http.HandleFunc("/s3Upload", HandleSnapShotUpload)
+	http.HandleFunc("/s3Download", HandleSnapShotDownload)
+	http.HandleFunc("/readFromSqs", HandleSqsRead)
+	http.HandleFunc("/putToSns", HandleSnsPush)
+
+	log.Info("server starting...")
+
+	//start http server
+	err = http.ListenAndServe(":3333", nil)
+	if errors.Is(err, http.ErrServerClosed) {
+		log.Error("server is closed")
+	} else if err != nil {
+		log.Errorf("error starting server : %s", err.Error())
+	}
+}
+
+func HandleSnsPush(w http.ResponseWriter, r *http.Request) {
 	data, err := io.ReadAll(r.Body)
-	topic := "arn:aws:sns:ap-south-1:876703040586:orderbook-service"
-	msg := string(data)
-	svc := sns.New(sess)
-	pubResult, err := svc.Publish(&sns.PublishInput{
-		Message:  &msg,
-		TopicArn: &topic,
-	})
-	fmt.Printf("publish result %s", pubResult.String())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
+	err = snsClient.PublishToSns(string(data))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Println(err.Error())
+		log.Errorf("error publishing to sns %s", err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
-func readFromSqs(w http.ResponseWriter, r *http.Request) {
+func HandleSqsRead(w http.ResponseWriter, r *http.Request) {
 	_, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
-	svc := sqs.New(sess)
-	urlResult, err := svc.GetQueueUrl(&sqs.GetQueueUrlInput{
-		QueueName: aws.String("nuelqueue.fifo"),
-	})
-	fmt.Printf("url %s", *urlResult.QueueUrl)
+	err = sqsClient.ReadFromQueue(1)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Printf("error getting queue url %s", err)
+		log.Infof("error getting queue url %s", err.Error())
 		return
 	}
-	msgResult, err := svc.ReceiveMessage(&sqs.ReceiveMessageInput{
-		QueueUrl:            urlResult.QueueUrl,
-		MaxNumberOfMessages: aws.Int64(10),
-	})
-	//messages := msgResult.GoString()
-	fmt.Printf("messages len %s", msgResult.String())
 	w.WriteHeader(http.StatusOK)
 }
 
-func S3Downloader(w http.ResponseWriter, r *http.Request) {
-	downloader := s3manager.NewDownloader(sess)
+func HandleSnapShotDownload(w http.ResponseWriter, r *http.Request) {
 	// Create a buffer to WriteAt to.
 	buf := aws.NewWriteAtBuffer([]byte{})
 	// Write the contents of S3 Object to the file
-	_, err := downloader.Download(buf, &s3.GetObjectInput{
-		Bucket: aws.String("nueltest"),
+	_, err := S3Downloader.Download(buf, &s3.GetObjectInput{
+		Bucket: aws.String(S3Bucket),
 		Key:    aws.String("file_test"),
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Printf("error downloading file %s", err)
+		log.Errorf("error downloading file %s", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", string(rune(len(buf.Bytes()))))
+	w.Header().Set("Content-Length", strconv.Itoa(len(buf.Bytes())))
 	w.WriteHeader(http.StatusOK)
 	_, err = w.Write(buf.Bytes())
 	if err != nil {
-		fmt.Printf("error writing to response %s", err)
+		log.Errorf("error writing to response %s", err.Error())
 	}
 }
 
-func S3Uploader(w http.ResponseWriter, r *http.Request) {
+func HandleSnapShotUpload(w http.ResponseWriter, r *http.Request) {
 	data, err := io.ReadAll(r.Body)
-
-	//create a vector of random bytes to upload to s3 of size 1GB
-	randData := make([]byte, 1024*1024*1024)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
-	fmt.Printf("hello from server %s \n", string(data))
-	uploader := s3manager.NewUploader(sess)
+	log.Info("uploading snapshot from enclave to s3")
 	// Upload the file to S3.
-	_, err = uploader.Upload(&s3manager.UploadInput{
-		Bucket: aws.String("nueltest"),
+	_, err = S3Uploader.Upload(&s3manager.UploadInput{
+		Bucket: aws.String(S3Bucket),
 		Key:    aws.String("file_test2"),
-		Body:   bytes.NewReader(randData),
+		Body:   bytes.NewReader(data),
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Printf("error uploading file %s", err)
+		log.Errorf("error uploading file %s", err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-}
-
-func main() {
-	http.HandleFunc("/s3Upload", S3Uploader)
-	http.HandleFunc("/s3Download", S3Downloader)
-	http.HandleFunc("/readFromSqs", readFromSqs)
-	http.HandleFunc("/putToSns", putToSns)
-	fmt.Println("server listening...")
-
-	err := http.ListenAndServe(":3333", nil)
-	if errors.Is(err, http.ErrServerClosed) {
-		fmt.Printf("server is closed\n")
-	} else if err != nil {
-		fmt.Printf("error starting server : %s\n", err)
-	}
 }
