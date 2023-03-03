@@ -1,19 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"io"
 	"net/http"
 	"os"
-	"strconv"
 )
 
 var (
@@ -55,10 +51,13 @@ func main() {
 	S3Downloader = s3manager.NewDownloader(sess)
 
 	//init http server
-	http.HandleFunc("/s3Upload", HandleSnapShotUpload)
-	http.HandleFunc("/s3Download", HandleSnapShotDownload)
-	http.HandleFunc("/readFromSqs", HandleSqsRead)
-	http.HandleFunc("/putToSns", HandleSnsPush)
+	http.HandleFunc("/s3UploadSnapshot", HandleSnapShotUpload)
+	http.HandleFunc("/s3DownloadSnapshot", HandleSnapShotDownload)
+	http.HandleFunc("getStateChange", HandleGetStateChange)
+	http.HandleFunc("/getSQSMessage", HandleSqsRead)
+	http.HandleFunc("/putSnsMessage", HandleSnsPush)
+	http.HandleFunc("getEnclaveInitData", HandleGetEnclaveInitData)
+	http.HandleFunc("putEnclaveInitData", HandlePutEnclaveInitData)
 
 	log.Info("server starting at port:3333")
 
@@ -69,93 +68,4 @@ func main() {
 	} else if err != nil {
 		log.Errorf("error starting server : %s", err.Error())
 	}
-}
-
-func HandleSnsPush(w http.ResponseWriter, r *http.Request) {
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	err = snsClient.PublishToSns(string(data))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		log.Errorf("error publishing to sns %s", err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-func HandleSqsRead(w http.ResponseWriter, r *http.Request) {
-	ReceiptHandle, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	log.Debug("receipt handle: ", string(ReceiptHandle))
-	//delete last message if receipt handle exists
-	if len(ReceiptHandle) != 0 {
-		err = sqsClient.DeleteLastMessage(string(ReceiptHandle))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			log.Errorf("error deleting last message %s", err.Error())
-			return
-		}
-	}
-	res, err := sqsClient.ReadFromQueue(1)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		log.Infof("error reading from queue %s", err.Error())
-		return
-	}
-	_, err = w.Write(res)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		log.Errorf("error writing to response %s", err.Error())
-		return
-	}
-}
-
-func HandleSnapShotDownload(w http.ResponseWriter, r *http.Request) {
-	// Create a buffer to WriteAt to.
-	buf := aws.NewWriteAtBuffer([]byte{})
-	// Write the contents of S3 Object to the file
-	_, err := S3Downloader.Download(buf, &s3.GetObjectInput{
-		Bucket: aws.String(S3Bucket),
-		Key:    aws.String("file_test"),
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		log.Errorf("error downloading file %s", err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(buf.Bytes())))
-	w.WriteHeader(http.StatusOK)
-	_, err = w.Write(buf.Bytes())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		log.Errorf("error writing to response %s", err.Error())
-	}
-}
-
-func HandleSnapShotUpload(w http.ResponseWriter, r *http.Request) {
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	log.Info("uploading snapshot from enclave to s3")
-	// Upload the file to S3.
-	_, err = S3Uploader.Upload(&s3manager.UploadInput{
-		Bucket: aws.String(S3Bucket),
-		Key:    aws.String("file_test2"),
-		Body:   bytes.NewReader(data),
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		log.Errorf("error uploading file %s", err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusOK)
 }

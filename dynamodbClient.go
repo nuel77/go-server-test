@@ -35,3 +35,21 @@ func (c *DynamoDBClient) ReadItem(HashKey string, RangeKey string) (*dynamodb.Ge
 	}
 	return result, err
 }
+
+func (c *DynamoDBClient) WriteItem(HashKey string, Range string, data string) error {
+	_, err := c.PutItem(&dynamodb.PutItemInput{
+		TableName: aws.String(c.TableName),
+		Item: map[string]*dynamodb.AttributeValue{
+			"hash_key": {
+				N: aws.String(HashKey),
+			},
+			"range_key": {
+				S: aws.String(Range),
+			},
+			"data": {
+				S: aws.String(data),
+			},
+		},
+	})
+	return err
+}
