@@ -1,16 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
 )
 
 type SqsClient struct {
-	client    *sqs.SQS
-	queueName string
-	queueUrl  string
-	messageId string
+	client            *sqs.SQS
+	queueName         string
+	queueUrl          string
+	messageId         string
+	lastReceiptHandle string
 }
 
 func NewSqsClient(sess *session.Session, name string) *SqsClient {
@@ -39,14 +41,34 @@ func (c *SqsClient) SendToQueue(stid string, message string) error {
 	return err
 }
 
-func (c *SqsClient) ReadFromQueue(max int64) error {
+func (c *SqsClient) ReadFromQueue(max int64) ([]byte, error) {
+	//send ack for last message
+	if c.lastReceiptHandle != "" {
+		_, err := c.client.DeleteMessage(&sqs.DeleteMessageInput{
+			QueueUrl:      &c.queueUrl,
+			ReceiptHandle: &c.lastReceiptHandle,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	//read new messages
 	msgResult, err := c.client.ReceiveMessage(&sqs.ReceiveMessageInput{
 		QueueUrl:            &c.queueUrl,
 		MaxNumberOfMessages: aws.Int64(max),
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	log.Info("messages len %s", msgResult.String())
-	return nil
+	result, err := json.Marshal(msgResult.Messages)
+	if err != nil {
+		return nil, err
+	}
+	//save the receipt handle for the last message
+	length := len(msgResult.Messages)
+	if length == 0 {
+		return nil, nil
+	}
+	c.lastReceiptHandle = *msgResult.Messages[length-1].ReceiptHandle
+	return result, nil
 }

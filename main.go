@@ -60,7 +60,7 @@ func main() {
 	http.HandleFunc("/readFromSqs", HandleSqsRead)
 	http.HandleFunc("/putToSns", HandleSnsPush)
 
-	log.Info("server starting...")
+	log.Info("server starting at port 3333")
 
 	//start http server
 	err = http.ListenAndServe(":3333", nil)
@@ -75,10 +75,11 @@ func HandleSnsPush(w http.ResponseWriter, r *http.Request) {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	err = snsClient.PublishToSns(string(data))
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		log.Errorf("error publishing to sns %s", err.Error())
 		return
 	}
@@ -89,14 +90,20 @@ func HandleSqsRead(w http.ResponseWriter, r *http.Request) {
 	_, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	err = sqsClient.ReadFromQueue(1)
+	res, err := sqsClient.ReadFromQueue(1)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		log.Infof("error getting queue url %s", err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	_, err = w.Write(res)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Errorf("error writing to response %s", err.Error())
+		return
+	}
 }
 
 func HandleSnapShotDownload(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +115,7 @@ func HandleSnapShotDownload(w http.ResponseWriter, r *http.Request) {
 		Key:    aws.String("file_test"),
 	})
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		log.Errorf("error downloading file %s", err)
 		return
 	}
@@ -117,6 +124,7 @@ func HandleSnapShotDownload(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, err = w.Write(buf.Bytes())
 	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		log.Errorf("error writing to response %s", err.Error())
 	}
 }
@@ -125,6 +133,7 @@ func HandleSnapShotUpload(w http.ResponseWriter, r *http.Request) {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	log.Info("uploading snapshot from enclave to s3")
 	// Upload the file to S3.
@@ -134,7 +143,7 @@ func HandleSnapShotUpload(w http.ResponseWriter, r *http.Request) {
 		Body:   bytes.NewReader(data),
 	})
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		log.Errorf("error uploading file %s", err.Error())
 		return
 	}
