@@ -60,7 +60,7 @@ func main() {
 	http.HandleFunc("/readFromSqs", HandleSqsRead)
 	http.HandleFunc("/putToSns", HandleSnsPush)
 
-	log.Info("server starting at port 3333")
+	log.Info("server starting at port:3333")
 
 	//start http server
 	err = http.ListenAndServe(":3333", nil)
@@ -87,15 +87,25 @@ func HandleSnsPush(w http.ResponseWriter, r *http.Request) {
 }
 
 func HandleSqsRead(w http.ResponseWriter, r *http.Request) {
-	_, err := io.ReadAll(r.Body)
+	ReceiptHandle, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	log.Debug("receipt handle: ", string(ReceiptHandle))
+	//delete last message if receipt handle exists
+	if len(ReceiptHandle) != 0 {
+		err = sqsClient.DeleteLastMessage(string(ReceiptHandle))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Errorf("error deleting last message %s", err.Error())
+			return
+		}
+	}
 	res, err := sqsClient.ReadFromQueue(1)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		log.Infof("error getting queue url %s", err.Error())
+		log.Infof("error reading from queue %s", err.Error())
 		return
 	}
 	_, err = w.Write(res)
