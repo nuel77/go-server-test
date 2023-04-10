@@ -2,67 +2,61 @@ package main
 
 import (
 	"errors"
+	"flag"
+	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"net/http"
-	"os"
 )
 
 var (
-	AwsRegion    string
-	SqsQueueName string
-	SnsTopicArn  string
-	S3Bucket     string
+	AwsRegion string
+	S3Bucket  string
 )
 var sess *session.Session
-var sqsClient *SqsClient
-var snsClient *SnsClient
 var log *zap.SugaredLogger
 var S3Uploader *s3manager.Uploader
 var S3Downloader *s3manager.Downloader
 
 func main() {
-	//load env
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
 	//init logger
 	config := zap.NewDevelopmentConfig()
 	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	logger, _ := config.Build()
 	log = logger.Sugar()
 
-	//init env vars
-	AwsRegion = os.Getenv("AWS_REGION")
-	SqsQueueName = os.Getenv("SQS_QUEUE_NAME")
-	SnsTopicArn = os.Getenv("SNS_TOPIC_ARN")
-	S3Bucket = os.Getenv("S3_BUCKET")
+	//init global vars
+	AwsRegionFlag := flag.String("awsregion", "ap-south-1", "region of aws")
+	S3BucketFlag := flag.String("s3bucket", "", "s3 bucket name of aws")
+	portFlag := flag.Int("port", 3333, "port to run server on")
+	flag.Parse()
 
+	AwsRegion = *AwsRegionFlag
+	S3Bucket = *S3BucketFlag
+	port := *portFlag
+
+	if len(S3Bucket) == 0 {
+		log.Fatal("s3 bucket name is empty")
+	}
+	log.Info("s3 bucket name: ", S3Bucket)
+	log.Infof("aws region: %s", AwsRegion)
+	log.Infof("port: %d", port)
 	//init aws clients
 	sess = session.Must(session.NewSession(&aws.Config{Region: aws.String(AwsRegion)}))
-	sqsClient = NewSqsClient(sess, SqsQueueName)
-	snsClient = NewSnsClient(sess)
 	S3Uploader = s3manager.NewUploader(sess)
 	S3Downloader = s3manager.NewDownloader(sess)
 
 	//init http server
+	http.HandleFunc("/ping", HandlePing)
 	http.HandleFunc("/s3UploadSnapshot", HandleSnapShotUpload)
 	http.HandleFunc("/s3DownloadSnapshot", HandleSnapShotDownload)
-	http.HandleFunc("getStateChange", HandleGetStateChange)
-	http.HandleFunc("/getSQSMessage", HandleSqsRead)
-	http.HandleFunc("/putSnsMessage", HandleSnsPush)
-	http.HandleFunc("getEnclaveInitData", HandleGetEnclaveInitData)
-	http.HandleFunc("putEnclaveInitData", HandlePutEnclaveInitData)
-
-	log.Info("server starting at port:3333")
+	log.Infof("server starting at port %d", port)
 
 	//start http server
-	err = http.ListenAndServe(":3333", nil)
+	err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
 	if errors.Is(err, http.ErrServerClosed) {
 		log.Error("server is closed")
 	} else if err != nil {
